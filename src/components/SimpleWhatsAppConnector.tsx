@@ -1,13 +1,16 @@
-
 import { useState, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
-import { Loader2, CheckCircle, Smartphone, AlertCircle, RefreshCw, WifiOff } from 'lucide-react';
+import { Loader2, CheckCircle, Smartphone, AlertCircle, RefreshCw, WifiOff, LogIn } from 'lucide-react';
 import { useSimpleWhatsApp } from '@/hooks/useSimpleWhatsApp';
+import { useAuth } from '@/contexts/AuthContext';
+import { useNavigate } from 'react-router-dom';
 
 const SimpleWhatsAppConnector = () => {
   const [qrCode, setQrCode] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const { user } = useAuth();
+  const navigate = useNavigate();
   
   const {
     status,
@@ -22,13 +25,49 @@ const SimpleWhatsAppConnector = () => {
     isSyncingGroups,
   } = useSimpleWhatsApp();
 
+  // Debug user state
+  console.log('🔐 SimpleWhatsAppConnector - User state:', {
+    hasUser: !!user,
+    userId: user?.id,
+    userEmail: user?.email
+  });
+
+  // If no user, show login prompt
+  if (!user) {
+    return (
+      <Card>
+        <CardContent className="p-8 text-center">
+          <div className="p-4 bg-blue-50 rounded-full w-fit mx-auto mb-6">
+            <LogIn className="h-12 w-12 text-blue-600" />
+          </div>
+          <h3 className="text-xl font-semibold text-gray-900 mb-4">
+            נדרשת התחברות
+          </h3>
+          <p className="text-gray-600 mb-6">
+            כדי להתחבר לוואטסאפ, יש להתחבר תחילה למערכת
+          </p>
+          <Button
+            onClick={() => navigate('/auth')}
+            className="bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 text-lg"
+          >
+            התחבר למערכת
+          </Button>
+        </CardContent>
+      </Card>
+    );
+  }
+
   // Handle connection result
   useEffect(() => {
     if (connectWhatsApp.data) {
+      console.log('🔄 Processing connection result:', connectWhatsApp.data);
+      
       if (connectWhatsApp.data.qr_code) {
+        console.log('📱 Setting QR code');
         setQrCode(connectWhatsApp.data.qr_code);
         setError(null);
       } else if (connectWhatsApp.data.already_connected) {
+        console.log('✅ Already connected');
         setQrCode(null);
         setError(null);
       }
@@ -38,6 +77,7 @@ const SimpleWhatsAppConnector = () => {
   // Handle connection errors
   useEffect(() => {
     if (connectWhatsApp.error) {
+      console.error('❌ Connection error detected:', connectWhatsApp.error);
       setError(connectWhatsApp.error.message || 'שגיאה בחיבור');
       setQrCode(null);
     }
@@ -48,37 +88,45 @@ const SimpleWhatsAppConnector = () => {
     let interval: NodeJS.Timeout;
     
     if (qrCode && !status?.connected) {
+      console.log('🔄 Starting status polling for QR scan');
       interval = setInterval(() => {
         checkStatus.mutate();
       }, 3000);
     }
     
     return () => {
-      if (interval) clearInterval(interval);
+      if (interval) {
+        console.log('⏹️ Stopping status polling');
+        clearInterval(interval);
+      }
     };
   }, [qrCode, status?.connected, checkStatus]);
 
   // Clear QR when connected
   useEffect(() => {
     if (status?.connected) {
+      console.log('✅ Connected - clearing QR code');
       setQrCode(null);
       setError(null);
     }
   }, [status?.connected]);
 
   const handleConnect = () => {
+    console.log('🚀 User clicked connect button');
     setError(null);
     setQrCode(null);
     connectWhatsApp.mutate();
   };
 
   const handleDisconnect = () => {
+    console.log('🔌 User clicked disconnect button');
     setError(null);
     setQrCode(null);
     disconnect.mutate();
   };
 
   const handleSyncGroups = () => {
+    console.log('🔄 User clicked sync groups button');
     syncGroups.mutate();
   };
 

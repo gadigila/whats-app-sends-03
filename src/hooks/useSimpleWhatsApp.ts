@@ -1,4 +1,3 @@
-
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/contexts/AuthContext';
@@ -13,39 +12,68 @@ interface SimpleWhapiRequest {
 const callSimpleWhapi = async (request: SimpleWhapiRequest) => {
   console.log('📞 Calling simple WHAPI:', request);
   
-  const { data, error } = await supabase.functions.invoke('whapi-simple', {
-    body: request
+  // Add more detailed logging
+  console.log('🔍 Request details:', {
+    userId: request.userId,
+    action: request.action,
+    hasData: !!request.data
   });
   
-  if (error) {
-    console.error('❌ WHAPI Error:', error);
-    throw error;
+  try {
+    const { data, error } = await supabase.functions.invoke('whapi-simple', {
+      body: request
+    });
+    
+    if (error) {
+      console.error('❌ WHAPI Error:', error);
+      throw error;
+    }
+    
+    console.log('✅ WHAPI Response:', data);
+    return data;
+  } catch (err) {
+    console.error('💥 Failed to call WHAPI function:', err);
+    throw err;
   }
-  
-  console.log('✅ WHAPI Response:', data);
-  return data;
 };
 
 export const useSimpleWhatsApp = () => {
   const { user } = useAuth();
   const queryClient = useQueryClient();
 
+  // Add extensive logging for user state
+  console.log('🔐 Auth state in useSimpleWhatsApp:', {
+    hasUser: !!user,
+    userId: user?.id,
+    userEmail: user?.email
+  });
+
   // Connect/Get QR Code
   const connectWhatsApp = useMutation({
     mutationFn: async () => {
-      if (!user?.id) throw new Error('User not authenticated');
+      console.log('🚀 Starting WhatsApp connect mutation');
+      
+      if (!user?.id) {
+        console.error('❌ No user ID available for connection');
+        throw new Error('אין משתמש מחובר - יש להתחבר תחילה');
+      }
+      
+      console.log('📱 Calling WHAPI connect for user:', user.id);
+      
       return callSimpleWhapi({
         userId: user.id,
         action: 'connect'
       });
     },
     onSuccess: (data) => {
-      if (data.already_connected) {
+      console.log('✅ Connect success:', data);
+      
+      if (data?.already_connected) {
         toast({
           title: "✅ כבר מחובר",
           description: "הוואטסאפ שלך כבר מחובר!",
         });
-      } else if (data.qr_code) {
+      } else if (data?.qr_code) {
         toast({
           title: "📱 קוד QR מוכן",
           description: "סרוק עם הוואטסאפ שלך",
@@ -54,7 +82,7 @@ export const useSimpleWhatsApp = () => {
       queryClient.invalidateQueries({ queryKey: ['whatsapp-status'] });
     },
     onError: (error) => {
-      console.error('Connection error:', error);
+      console.error('❌ Connection error:', error);
       toast({
         title: "❌ שגיאה בחיבור",
         description: error.message || "נסה שוב",
@@ -66,14 +94,24 @@ export const useSimpleWhatsApp = () => {
   // Check Status
   const checkStatus = useMutation({
     mutationFn: async () => {
-      if (!user?.id) throw new Error('User not authenticated');
+      if (!user?.id) {
+        console.error('❌ No user ID for status check');
+        throw new Error('אין משתמש מחובר');
+      }
+      
+      console.log('🔍 Checking status for user:', user.id);
+      
       return callSimpleWhapi({
         userId: user.id,
         action: 'status'
       });
     },
     onSuccess: (data) => {
+      console.log('📊 Status check result:', data);
       queryClient.setQueryData(['whatsapp-status'], data);
+    },
+    onError: (error) => {
+      console.error('❌ Status check error:', error);
     }
   });
 
@@ -172,7 +210,13 @@ export const useSimpleWhatsApp = () => {
   const statusQuery = useQuery({
     queryKey: ['whatsapp-status'],
     queryFn: async () => {
-      if (!user?.id) return null;
+      if (!user?.id) {
+        console.log('⚠️ No user ID for status query');
+        return null;
+      }
+      
+      console.log('🔄 Running status query for user:', user.id);
+      
       return callSimpleWhapi({
         userId: user.id,
         action: 'status'

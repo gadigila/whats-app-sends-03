@@ -1,1 +1,53 @@
+
 project_id = "ifxvwettmgixfbivlzzl"
+
+[functions.whapi-simple]
+verify_jwt = false
+
+[functions.whapi-webhook-simple]
+verify_jwt = false
+
+[functions.message-scheduler-simple]
+verify_jwt = false
+
+[functions.cleanup-expired-trials]
+verify_jwt = false
+
+[functions.whatsapp-scheduler]
+verify_jwt = false
+
+[functions.sync-whatsapp-groups]
+verify_jwt = false
+
+[functions.send-immediate-message]
+verify_jwt = false
+
+[functions.manage-instance-lifecycle]
+verify_jwt = false
+
+[functions.whapi-partner-login]
+verify_jwt = false
+
+[functions.whapi-get-qr]
+verify_jwt = false
+
+[functions.whapi-check-status]
+verify_jwt = false
+
+[functions.whapi-webhook]
+verify_jwt = false
+
+[functions.whapi-unified-connect]
+verify_jwt = false
+
+[functions.whapi-delete-instance]
+verify_jwt = false
+
+[functions.whapi-manual-status-sync]
+verify_jwt = false
+
+[functions.whapi-auto-recovery]
+verify_jwt = false
+
+[functions.whapi-diagnostics]
+verify_jwt = false

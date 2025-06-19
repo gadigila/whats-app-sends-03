@@ -1,10 +1,20 @@
 
 project_id = "ifxvwettmgixfbivlzzl"
 
-[functions.whatsapp-scheduler]
+[functions.whapi-simple]
+verify_jwt = false
+
+[functions.whapi-webhook-simple]
+verify_jwt = false
+
+[functions.message-scheduler-simple]
 verify_jwt = false
 
 [functions.cleanup-expired-trials]
+verify_jwt = false
+
+# Keep old functions for now (can be removed later)
+[functions.whatsapp-scheduler]
 verify_jwt = false
 
 [functions.sync-whatsapp-groups]

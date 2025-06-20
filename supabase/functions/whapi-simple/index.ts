@@ -1,3 +1,4 @@
+
 import { createClient } from 'jsr:@supabase/supabase-js@2'
 
 const corsHeaders = {
@@ -11,9 +12,6 @@ interface RequestBody {
   data?: any
 }
 
-// Helper for delays
-const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
-
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders })
@@ -25,7 +23,6 @@ Deno.serve(async (req) => {
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!
     const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
     const whapiPartnerToken = Deno.env.get('WHAPI_PARTNER_TOKEN')!
-    const whapiProjectId = Deno.env.get('WHAPI_PROJECT_ID')!
     
     const { userId, action, data } = await req.json() as RequestBody
     
@@ -59,10 +56,27 @@ Deno.serve(async (req) => {
         })
     }
 
+    // Check trial status for non-basic actions
+    if (action !== 'connect' && action !== 'status' && action !== 'disconnect') {
+      const now = new Date()
+      const trialExpired = profile?.trial_expires_at && new Date(profile.trial_expires_at) < now
+      const isPaid = profile?.payment_plan === 'monthly' || profile?.payment_plan === 'yearly'
+      
+      if (trialExpired && !isPaid) {
+        return new Response(
+          JSON.stringify({ 
+            error: 'Trial expired',
+            message: 'Please upgrade to continue using WhatsApp features'
+          }),
+          { status: 403, headers: corsHeaders }
+        )
+      }
+    }
+
     // Handle different actions
     switch (action) {
       case 'status':
-        return await handleStatus(supabase, userId, whapiPartnerToken)
+        return await handleStatus(supabase, userId)
       
       case 'disconnect':
         return await handleDisconnect(supabase, userId, whapiPartnerToken)
@@ -80,7 +94,7 @@ Deno.serve(async (req) => {
         return await handleGetMessages(supabase, userId, data)
       
       default: // 'connect'
-        return await handleConnect(supabase, userId, whapiPartnerToken, whapiProjectId, supabaseUrl)
+        return await handleConnect(supabase, userId, whapiPartnerToken)
     }
 
   } catch (error) {
@@ -92,58 +106,37 @@ Deno.serve(async (req) => {
   }
 })
 
-// === CONNECT USING CORRECT WHAPI WORKFLOW ===
-async function handleConnect(
-  supabase: any, 
-  userId: string, 
-  partnerToken: string, 
-  projectId: string,
-  supabaseUrl: string
-) {
-  console.log('🔗 Starting WHAPI connection workflow for user:', userId)
-
-  // Get current profile
+// === CONNECT / QR CODE ===
+async function handleConnect(supabase: any, userId: string, partnerToken: string) {
+  console.log('🔗 Handling connect for user:', userId)
+  
   const { data: profile } = await supabase
     .from('profiles')
     .select('*')
     .eq('id', userId)
     .single()
 
-  // STEP 1: Check existing channel via Manager API
-  if (profile?.instance_id && profile?.whapi_token) {
-    console.log('🔍 Found existing channel, checking via Manager API...')
+  // Check if already has a working token
+  if (profile?.whapi_token) {
+    console.log('🔍 Checking existing token...')
     
-    const channelCheckRes = await fetch(
-      `https://manager.whapi.cloud/channels/${profile.instance_id}`,
-      {
-        headers: {
-          'Authorization': `Bearer ${partnerToken}`,
-          'Accept': 'application/json'
-        }
-      }
-    )
+    const healthCheck = await fetch('https://gate.whapi.cloud/health', {
+      headers: { 'Authorization': `Bearer ${profile.whapi_token}` }
+    })
 
-    if (channelCheckRes.ok) {
-      const channelInfo = await channelCheckRes.json()
-      console.log('📋 Channel info from Manager API:', {
-        id: channelInfo.id,
-        status: channelInfo.status,
-        hasToken: !!channelInfo.token
-      })
+    if (healthCheck.ok) {
+      const health = await healthCheck.json()
+      console.log('📊 Health status:', health.status)
+      
+      if (health.status === 'authenticated' || health.status === 'ready') {
+        await supabase
+          .from('profiles')
+          .update({ 
+            instance_status: 'connected',
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', userId)
 
-      // Update status in database
-      await supabase
-        .from('profiles')
-        .update({
-          instance_status: channelInfo.status,
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', userId)
-
-      // Check if already connected
-      if (channelInfo.status === 'active' || 
-          channelInfo.status === 'authenticated' || 
-          channelInfo.status === 'connected') {
         return new Response(
           JSON.stringify({ 
             success: true,
@@ -153,44 +146,85 @@ async function handleConnect(
           { status: 200, headers: corsHeaders }
         )
       }
-
-      // If channel needs QR or is ready for QR
-      if (channelInfo.status === 'qr' || 
-          channelInfo.status === 'pending' || 
-          channelInfo.status === 'launched' ||
-          channelInfo.status === 'waiting' ||
-          channelInfo.status === 'unauthorized') {
+      
+      if (health.status === 'qr' || health.status === 'unauthorized') {
+        console.log('📱 Getting QR code...')
         
-        const qrResult = await attemptGetQR(channelInfo.token || profile.whapi_token)
-        if (qrResult.success) {
-          return new Response(
-            JSON.stringify(qrResult),
-            { status: 200, headers: corsHeaders }
-          )
+        const qrResponse = await fetch('https://gate.whapi.cloud/qr', {
+          headers: { 
+            'Authorization': `Bearer ${profile.whapi_token}`,
+            'Accept': 'application/json'
+          }
+        })
+
+        if (qrResponse.ok) {
+          const qrData = await qrResponse.json()
+          let qrCode = qrData.qr || qrData.qrCode || qrData.image || qrData.base64
+          
+          if (qrCode) {
+            if (!qrCode.startsWith('data:image/')) {
+              qrCode = `data:image/png;base64,${qrCode}`
+            }
+
+            await supabase
+              .from('profiles')
+              .update({ 
+                instance_status: 'unauthorized',
+                updated_at: new Date().toISOString()
+              })
+              .eq('id', userId)
+
+            return new Response(
+              JSON.stringify({ 
+                success: true,
+                qr_code: qrCode,
+                message: 'Scan QR code with WhatsApp'
+              }),
+              { status: 200, headers: corsHeaders }
+            )
+          }
         }
       }
-    } else {
-      console.log('❌ Channel check failed:', channelCheckRes.status)
     }
   }
 
-  // STEP 2: Create new channel via Manager API
-  console.log('🆕 Creating new channel via Manager API...')
+  // Create new instance
+  console.log('🆕 Creating new instance...')
   
-  // Clean up old channel if exists
+  // Clean up old instance if exists
   if (profile?.instance_id) {
     try {
       await fetch(`https://manager.whapi.cloud/channels/${profile.instance_id}`, {
         method: 'DELETE',
         headers: { 'Authorization': `Bearer ${partnerToken}` }
       })
-      console.log('🗑️ Deleted old channel')
+      console.log('🗑️ Cleaned up old instance')
     } catch (e) {
-      console.log('⚠️ Could not delete old channel:', e)
+      console.log('Cleanup error (continuing):', e)
     }
   }
 
-  // Create new channel
+  // Get or use project ID
+  let projectId = Deno.env.get('WHAPI_PROJECT_ID')
+  
+  if (!projectId) {
+    const projectsRes = await fetch('https://manager.whapi.cloud/projects', {
+      headers: { 'Authorization': `Bearer ${partnerToken}` }
+    })
+    
+    if (projectsRes.ok) {
+      const projects = await projectsRes.json()
+      if (projects?.length > 0) {
+        projectId = projects[0].id
+      }
+    }
+  }
+
+  if (!projectId) {
+    throw new Error('No WHAPI project available')
+  }
+
+  // Create channel
   const createRes = await fetch('https://manager.whapi.cloud/channels', {
     method: 'PUT',
     headers: {
@@ -208,264 +242,118 @@ async function handleConnect(
     throw new Error(`Failed to create channel: ${error}`)
   }
 
-  const newChannel = await createRes.json()
-  console.log('✅ New channel created:', {
-    id: newChannel.id,
-    name: newChannel.name,
-    status: newChannel.status,
-    hasToken: !!newChannel.token
-  })
+  const channel = await createRes.json()
+  console.log('✅ Created channel:', channel.id)
+
+  // Setup webhook
+  const supabaseUrl = Deno.env.get('SUPABASE_URL')!
+  try {
+    await fetch('https://gate.whapi.cloud/settings', {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${channel.token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        webhooks: [{
+          url: `${supabaseUrl}/functions/v1/whapi-webhook-simple`,
+          events: ['users', 'channel'],
+          mode: 'body'
+        }]
+      })
+    })
+    console.log('🔗 Webhook configured')
+  } catch (e) {
+    console.log('Webhook setup warning:', e)
+  }
 
   // Save to database
   await supabase
     .from('profiles')
     .update({
-      instance_id: newChannel.id,
-      whapi_token: newChannel.token,
+      instance_id: channel.id,
+      whapi_token: channel.token,
       instance_status: 'initializing',
       updated_at: new Date().toISOString()
     })
     .eq('id', userId)
 
-  // STEP 3: Wait for channel initialization
-  console.log('⏳ Waiting for channel initialization...')
-  await delay(3000)
+  console.log('💾 Saved to database')
 
-  // STEP 4: Poll channel status via Manager API until ready
+  // Wait for initialization and get QR
+  await new Promise(resolve => setTimeout(resolve, 3000))
+
   let attempts = 0
-  const maxAttempts = 12 // 24 seconds total
+  while (attempts < 8) {
+    const healthCheck = await fetch('https://gate.whapi.cloud/health', {
+      headers: { 'Authorization': `Bearer ${channel.token}` }
+    })
 
-  while (attempts < maxAttempts) {
-    console.log(`🔄 Checking channel status (attempt ${attempts + 1}/${maxAttempts})...`)
-    
-    const statusRes = await fetch(
-      `https://manager.whapi.cloud/channels/${newChannel.id}`,
-      {
-        headers: {
-          'Authorization': `Bearer ${partnerToken}`,
-          'Accept': 'application/json'
-        }
-      }
-    )
-
-    if (statusRes.ok) {
-      const channelStatus = await statusRes.json()
-      console.log('📊 Channel status:', channelStatus.status)
-
-      // Update database with latest status
-      await supabase
-        .from('profiles')
-        .update({
-          instance_status: channelStatus.status,
-          updated_at: new Date().toISOString()
+    if (healthCheck.ok) {
+      const health = await healthCheck.json()
+      console.log(`Attempt ${attempts + 1}: ${health.status}`)
+      
+      if (health.status === 'qr' || health.status === 'unauthorized') {
+        const qrResponse = await fetch('https://gate.whapi.cloud/qr', {
+          headers: { 
+            'Authorization': `Bearer ${channel.token}`,
+            'Accept': 'application/json'
+          }
         })
-        .eq('id', userId)
 
-      // Check if ready for QR
-      if (channelStatus.status === 'qr' || 
-          channelStatus.status === 'pending' || 
-          channelStatus.status === 'launched' ||
-          channelStatus.status === 'waiting' ||
-          channelStatus.status === 'unauthorized') {
-        
-        // STEP 5: Configure webhook
-        try {
-          await configureWebhook(newChannel.token, supabaseUrl)
-          console.log('🔗 Webhook configured')
-        } catch (e) {
-          console.log('⚠️ Webhook configuration warning:', e)
-        }
+        if (qrResponse.ok) {
+          const qrData = await qrResponse.json()
+          let qrCode = qrData.qr || qrData.qrCode || qrData.image || qrData.base64
+          
+          if (qrCode) {
+            if (!qrCode.startsWith('data:image/')) {
+              qrCode = `data:image/png;base64,${qrCode}`
+            }
 
-        // STEP 6: Get QR code via Gate API
-        const qrResult = await attemptGetQR(newChannel.token)
-        if (qrResult.success) {
-          return new Response(
-            JSON.stringify(qrResult),
-            { status: 200, headers: corsHeaders }
-          )
+            await supabase
+              .from('profiles')
+              .update({ 
+                instance_status: 'unauthorized',
+                updated_at: new Date().toISOString()
+              })
+              .eq('id', userId)
+
+            return new Response(
+              JSON.stringify({ 
+                success: true,
+                qr_code: qrCode,
+                message: 'New instance created! Scan QR code with WhatsApp'
+              }),
+              { status: 200, headers: corsHeaders }
+            )
+          }
         }
       }
-
-      // If already connected
-      if (channelStatus.status === 'active' || 
-          channelStatus.status === 'authenticated' || 
-          channelStatus.status === 'connected') {
-        return new Response(
-          JSON.stringify({ 
-            success: true,
-            already_connected: true,
-            message: 'Channel connected successfully!'
-          }),
-          { status: 200, headers: corsHeaders }
-        )
-      }
-    } else {
-      console.log(`❌ Status check failed: ${statusRes.status}`)
     }
 
     attempts++
-    await delay(2000)
+    await new Promise(resolve => setTimeout(resolve, 2000))
   }
 
-  // If we reach here, channel was created but not ready yet
   return new Response(
     JSON.stringify({ 
       success: true,
-      message: 'Channel created successfully. Please try again in a few moments to get QR code.',
-      instance_id: newChannel.id,
-      status: 'initializing'
+      message: 'Instance created. Please try getting QR code in a moment.',
+      instance_id: channel.id
     }),
     { status: 200, headers: corsHeaders }
   )
 }
 
-// === ATTEMPT TO GET QR CODE VIA GATE API ===
-async function attemptGetQR(channelToken: string) {
-  console.log('📱 Attempting to get QR code via Gate API...')
-  
-  // Try the most common QR endpoints based on WHAPI docs
-  const qrEndpoints = [
-    'https://gate.whapi.cloud/screen',
-    'https://gate.whapi.cloud/screenshot', 
-    'https://gate.whapi.cloud/qr',
-    'https://gate.whapi.cloud/auth/qr',
-    'https://gate.whapi.cloud/instance/qr'
-  ]
-
-  for (const endpoint of qrEndpoints) {
-    try {
-      console.log(`🔍 Trying QR endpoint: ${endpoint}`)
-      
-      const qrRes = await fetch(endpoint, {
-        headers: {
-          'Authorization': `Bearer ${channelToken}`,
-          'Accept': 'application/json'
-        }
-      })
-
-      console.log(`📡 Response from ${endpoint}: ${qrRes.status}`)
-
-      if (qrRes.ok) {
-        const qrData = await qrRes.json()
-        console.log('📋 QR response data keys:', Object.keys(qrData))
-        
-        // Look for QR in different possible response fields
-        let qrCode = qrData.qr || qrData.screen || qrData.image || 
-                    qrData.base64 || qrData.qrCode || qrData.data ||
-                    qrData.screenshot || qrData.qr_code
-
-        if (qrCode) {
-          // Ensure proper data URI format
-          if (!qrCode.startsWith('data:image/')) {
-            qrCode = `data:image/png;base64,${qrCode}`
-          }
-
-          console.log('✅ QR code retrieved successfully!')
-          
-          return {
-            success: true,
-            qr_code: qrCode,
-            message: 'Scan this QR code with WhatsApp'
-          }
-        } else {
-          console.log('⚠️ QR data received but no QR field found:', qrData)
-        }
-      } else {
-        const errorText = await qrRes.text()
-        console.log(`❌ QR endpoint ${endpoint} error:`, errorText)
-      }
-    } catch (error) {
-      console.log(`💥 Error trying ${endpoint}:`, error.message)
-    }
-  }
-
-  // Try to initialize/start the instance first
-  try {
-    console.log('🔄 Trying to initialize instance...')
-    
-    const initEndpoints = [
-      'https://gate.whapi.cloud/start',
-      'https://gate.whapi.cloud/init',
-      'https://gate.whapi.cloud/instance/start'
-    ]
-
-    for (const initEndpoint of initEndpoints) {
-      try {
-        const initRes = await fetch(initEndpoint, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${channelToken}`,
-            'Content-Type': 'application/json'
-          }
-        })
-
-        if (initRes.ok) {
-          console.log(`✅ Instance initialized via ${initEndpoint}`)
-          await delay(3000)
-          
-          // Try QR endpoints again after initialization
-          return await attemptGetQR(channelToken)
-        }
-      } catch (e) {
-        console.log(`Failed to init via ${initEndpoint}:`, e.message)
-      }
-    }
-  } catch (e) {
-    console.log('💥 Initialization attempt failed:', e)
-  }
-
-  return {
-    success: false,
-    message: 'QR code not available yet. The channel may still be initializing.'
-  }
-}
-
-// === CONFIGURE WEBHOOK ===
-async function configureWebhook(channelToken: string, supabaseUrl: string) {
-  const webhookUrl = `${supabaseUrl}/functions/v1/whapi-webhook-simple`
-  
-  const webhookEndpoints = [
-    'https://gate.whapi.cloud/settings',
-    'https://gate.whapi.cloud/webhook',
-    'https://gate.whapi.cloud/instance/webhook'
-  ]
-
-  for (const endpoint of webhookEndpoints) {
-    try {
-      const res = await fetch(endpoint, {
-        method: 'PATCH',
-        headers: {
-          'Authorization': `Bearer ${channelToken}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          webhooks: [{
-            url: webhookUrl,
-            events: ['users', 'channel', 'messages'],
-            mode: 'body'
-          }]
-        })
-      })
-
-      if (res.ok) {
-        console.log(`✅ Webhook configured via ${endpoint}`)
-        return
-      }
-    } catch (e) {
-      console.log(`Failed webhook config via ${endpoint}:`, e.message)
-    }
-  }
-}
-
 // === STATUS CHECK ===
-async function handleStatus(supabase: any, userId: string, partnerToken: string) {
+async function handleStatus(supabase: any, userId: string) {
   const { data: profile } = await supabase
     .from('profiles')
     .select('*')
     .eq('id', userId)
     .single()
 
-  if (!profile?.instance_id) {
+  if (!profile?.whapi_token) {
     return new Response(
       JSON.stringify({ 
         connected: false, 
@@ -476,76 +364,54 @@ async function handleStatus(supabase: any, userId: string, partnerToken: string)
     )
   }
 
-  // Check status via Manager API first
-  try {
-    const managerRes = await fetch(
-      `https://manager.whapi.cloud/channels/${profile.instance_id}`,
-      {
-        headers: {
-          'Authorization': `Bearer ${partnerToken}`,
-          'Accept': 'application/json'
-        }
-      }
+  const healthCheck = await fetch('https://gate.whapi.cloud/health', {
+    headers: { 'Authorization': `Bearer ${profile.whapi_token}` }
+  })
+
+  if (!healthCheck.ok) {
+    return new Response(
+      JSON.stringify({ 
+        connected: false, 
+        status: 'error',
+        message: 'Failed to check status'
+      }),
+      { status: 200, headers: corsHeaders }
     )
-
-    if (managerRes.ok) {
-      const channelInfo = await managerRes.json()
-      const connected = channelInfo.status === 'active' || 
-                       channelInfo.status === 'authenticated' || 
-                       channelInfo.status === 'connected'
-
-      // Update database
-      await supabase
-        .from('profiles')
-        .update({ 
-          instance_status: channelInfo.status,
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', userId)
-
-      return new Response(
-        JSON.stringify({ 
-          connected,
-          status: channelInfo.status,
-          message: connected ? 'WhatsApp connected' : 'WhatsApp not connected'
-        }),
-        { status: 200, headers: corsHeaders }
-      )
-    }
-  } catch (e) {
-    console.log('Manager API status check failed:', e)
   }
 
-  // Fallback to Gate API health check
-  if (profile?.whapi_token) {
-    try {
-      const healthRes = await fetch('https://gate.whapi.cloud/health', {
-        headers: { 'Authorization': `Bearer ${profile.whapi_token}` }
+  const health = await healthCheck.json()
+  const connected = health.status === 'authenticated' || health.status === 'ready'
+
+  let newStatus = 'disconnected'
+  if (connected) {
+    newStatus = 'connected'
+  } else if (health.status === 'qr' || health.status === 'unauthorized') {
+    newStatus = 'unauthorized'
+  }
+  
+  if (newStatus !== profile.instance_status) {
+    await supabase
+      .from('profiles')
+      .update({ 
+        instance_status: newStatus,
+        updated_at: new Date().toISOString()
       })
-
-      if (healthRes.ok) {
-        const health = await healthRes.json()
-        const connected = health.status === 'authenticated' || health.status === 'ready'
-
-        return new Response(
-          JSON.stringify({ 
-            connected,
-            status: health.status,
-            message: connected ? 'WhatsApp connected' : 'WhatsApp not connected'
-          }),
-          { status: 200, headers: corsHeaders }
-        )
-      }
-    } catch (e) {
-      console.log('Gate API health check failed:', e)
-    }
+      .eq('id', userId)
   }
+
+  // Check trial status
+  const now = new Date()
+  const trialExpired = profile.trial_expires_at && new Date(profile.trial_expires_at) < now
+  const isPaid = profile.payment_plan === 'monthly' || profile.payment_plan === 'yearly'
 
   return new Response(
     JSON.stringify({ 
-      connected: false, 
-      status: 'error',
-      message: 'Failed to check status'
+      connected,
+      status: health.status,
+      message: connected ? 'WhatsApp connected' : 'WhatsApp not connected',
+      trial_expired: trialExpired && !isPaid,
+      trial_expires_at: profile.trial_expires_at,
+      payment_plan: profile.payment_plan
     }),
     { status: 200, headers: corsHeaders }
   )
